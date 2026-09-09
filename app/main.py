@@ -1,4 +1,6 @@
 import asyncio
+import csv
+import io
 import json
 import os
 import random
@@ -8,7 +10,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .game_logic import BoardState, calculate_turn, create_initial_state, get_flashing_cells, get_player_view
@@ -26,6 +28,8 @@ app.mount('/static', StaticFiles(directory=str(BASE_DIR / 'static')), name='stat
 TURN_SECONDS = 30
 REST_SECONDS = 60
 TURNS_PER_GAME = 20
+DATA_DIR = BASE_DIR.parent / 'data'
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @app.get('/')
@@ -39,13 +43,62 @@ async def healthz():
     return {'status': 'ok', 'waitingPlayers': len(waiting)}
 
 
+def _record_path(room_id: str) -> Path:
+    return DATA_DIR / f'{room_id}.json'
+
+
+@app.get('/data/{room_id}.json')
+async def download_room_json(room_id: str):
+    path = _record_path(room_id)
+    if not path.exists():
+        return JSONResponse({'error': 'record not found'}, status_code=404)
+    return FileResponse(path, media_type='application/json', filename=f'game-{room_id}.json')
+
+
+@app.get('/data/{room_id}.csv')
+async def download_room_csv(room_id: str):
+    path = _record_path(room_id)
+    if not path.exists():
+        return JSONResponse({'error': 'record not found'}, status_code=404)
+    record = json.loads(path.read_text(encoding='utf-8'))
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['game', 'turn', 'player1_indices', 'player2_indices', 'numbers_before', 'numbers_after'])
+    for row in record.get('turns', []):
+        writer.writerow([
+            row['game'], row['turn'],
+            json.dumps(row['player1Indices'], ensure_ascii=False),
+            json.dumps(row['player2Indices'], ensure_ascii=False),
+            json.dumps(row['numbersBefore'], ensure_ascii=False),
+            json.dumps(row['numbersAfter'], ensure_ascii=False),
+        ])
+    data = output.getvalue().encode('utf-8-sig')
+    return StreamingResponse(io.BytesIO(data), media_type='text/csv; charset=utf-8', headers={
+        'Content-Disposition': f'attachment; filename=game-{room_id}.csv'
+    })
+
+
+@app.get('/data')
+async def list_records():
+    records = []
+    for path in sorted(DATA_DIR.glob('*.json'), key=lambda x: x.stat().st_mtime, reverse=True):
+        room_id = path.stem
+        records.append({
+            'roomId': room_id,
+            'jsonUrl': f'/data/{room_id}.json',
+            'csvUrl': f'/data/{room_id}.csv',
+        })
+    return {'records': records}
+
+
 class Player:
-    def __init__(self, ws: WebSocket, total_games: int, rows: int, cols: int):
+    def __init__(self, ws: WebSocket, total_games: int, rows: int, cols: int, boards: int):
         self.id = str(uuid.uuid4())
         self.ws = ws
         self.total_games = total_games
         self.rows = rows
         self.cols = cols
+        self.boards = boards
         self.number = 0
         self.room: Optional['GameRoom'] = None
 
@@ -61,6 +114,13 @@ class GameRoom:
         self.rows = min(p1.rows, p2.rows)
         self.cols = min(p1.cols, p2.cols)
         self.total_games = min(p1.total_games, p2.total_games)
+        self.boards = p1.boards
+        self.room_id = str(uuid.uuid4())
+        self.record = {
+            'roomId': self.room_id,
+            'rows': self.rows, 'cols': self.cols, 'boards': self.boards,
+            'totalGames': self.total_games, 'turns': [],
+        }
         self.game_number = 0
         self.turn_number = 0
         self.state: BoardState = create_initial_state(self.rows, self.cols, 1)
@@ -81,12 +141,12 @@ class GameRoom:
 
     async def send_state_to_each(self, phase: str, seconds: int = 0, flashing=None):
         for p in self.players:
-            view = get_player_view(p.number, self.game_number, self.turn_number, self.state)
+            view = get_player_view(p.number, self.game_number, self.turn_number, self.state, self.boards)
             payload = {
                 'type': 'state', 'phase': phase, 'player': p.number,
                 'game': self.game_number, 'totalGames': self.total_games,
                 'turn': self.turn_number, 'turnsPerGame': TURNS_PER_GAME,
-                'seconds': seconds, 'rows': self.rows, 'cols': self.cols,
+                'seconds': seconds, 'rows': self.rows, 'cols': self.cols, 'boards': self.boards,
                 'board': view,
                 'flashing': flashing or [],
             }
@@ -94,8 +154,8 @@ class GameRoom:
 
     async def run(self):
         await asyncio.gather(
-            self.safe_send(self.players[0], {'type': 'matched', 'player': 1}),
-            self.safe_send(self.players[1], {'type': 'matched', 'player': 2}),
+            self.safe_send(self.players[0], {'type': 'matched', 'player': 1, 'roomId': self.room_id, 'boards': self.boards}),
+            self.safe_send(self.players[1], {'type': 'matched', 'player': 2, 'roomId': self.room_id, 'boards': self.boards}),
         )
         for game in range(1, self.total_games + 1):
             if self.closed: return
@@ -125,7 +185,19 @@ class GameRoom:
                         self.selections[n] = random.sample(all_cells, count)
                         await self.safe_send(self.players[n - 1], {'type': 'auto_selected', 'cells': self.selections[n]})
 
+                numbers_before = [row[:] for row in self.state["numbers"]]
                 self.state = calculate_turn(self.selections[1], self.selections[2], turn, self.state)
+                self.record['turns'].append({
+                    'game': game,
+                    'turn': turn,
+                    'player1Indices': [r * self.cols + c for r, c in self.selections[1]],
+                    'player2Indices': [r * self.cols + c for r, c in self.selections[2]],
+                    'player1Cells': [list(cell) for cell in self.selections[1]],
+                    'player2Cells': [list(cell) for cell in self.selections[2]],
+                    'numbersBefore': numbers_before,
+                    'numbersAfter': [row[:] for row in self.state["numbers"]],
+                })
+                self.save_record()
                 flashing = get_flashing_cells(self.selections[1], self.selections[2], turn, self.state)
                 await self.send_state_to_each('turn_result', flashing=flashing)
                 await asyncio.sleep(1.0)
@@ -143,7 +215,15 @@ class GameRoom:
                 if self.closed: return
                 await self.broadcast({'type': 'rest_complete'})
             else:
-                await self.broadcast({'type': 'game_over'})
+                self.save_record()
+                await self.broadcast({'type': 'game_over', 'roomId': self.room_id, 'jsonUrl': f'/data/{self.room_id}.json', 'csvUrl': f'/data/{self.room_id}.csv'})
+
+
+    def save_record(self):
+        path = _record_path(self.room_id)
+        tmp = path.with_suffix('.json.tmp')
+        tmp.write_text(json.dumps(self.record, ensure_ascii=False, indent=2), encoding='utf-8')
+        tmp.replace(path)
 
     async def submit(self, player: Player, cells):
         if self.turn_number < 1 or self.turn_number > TURNS_PER_GAME: return
@@ -173,7 +253,7 @@ async def enqueue(player: Player):
     async with waiting_lock:
         match = None
         for p in waiting:
-            if p.rows == player.rows and p.cols == player.cols and p.total_games == player.total_games:
+            if p.rows == player.rows and p.cols == player.cols and p.total_games == player.total_games and p.boards == player.boards:
                 match = p; break
         if match:
             waiting.remove(match)
@@ -190,11 +270,12 @@ async def ws_endpoint(ws: WebSocket):
     try:
         hello = await ws.receive_json()
         total_games = max(1, min(100, int(hello.get('totalGames', 1))))
+        boards = max(1, min(4, int(hello.get('boards', 3))))
         # 当前游戏机制在 game_logic.py 中固定使用 6x6 地图。
         # 服务端强制使用 6x6，避免恶意或旧客户端传入其他尺寸导致越界。
         rows = 6
         cols = 6
-        player = Player(ws, total_games, rows, cols)
+        player = Player(ws, total_games, rows, cols, boards)
         await enqueue(player)
         while True:
             msg = await ws.receive_json()

@@ -117,6 +117,33 @@ def get_player_view(
     game_number: int,
     turn_number: int,
     shared_state: BoardState,
+    boards: int = 3,
 ) -> BoardState:
-    """TODO: customize each player's visible board. Default: identical views."""
-    return shared_state
+    """Return a player-specific view of the board colors.
+
+    boards=1: all blue
+    boards=2: all red
+    boards=3: left half blue, right half red
+    boards=4: circle/player 1 sees boards=3; diamond/player 2 sees boards=2
+
+    Shapes, numbers and war locations are shared game state; only the visible
+    color treatment changes between board conditions.
+    """
+    rows = len(shared_state["colors"])
+    cols = len(shared_state["colors"][0]) if rows else 0
+    effective_boards = 3 if boards == 4 and player_number == 1 else (2 if boards == 4 else boards)
+
+    if effective_boards == 1:
+        colors = [[1 for _ in range(cols)] for _ in range(rows)]
+    elif effective_boards == 2:
+        colors = [[2 for _ in range(cols)] for _ in range(rows)]
+    else:
+        split = cols // 2
+        colors = [[1 if c < split else 2 for c in range(cols)] for _ in range(rows)]
+
+    return {
+        "colors": colors,
+        "shapes": shared_state["shapes"],
+        "numbers": shared_state["numbers"],
+        "warLocation": shared_state["warLocation"],
+    }

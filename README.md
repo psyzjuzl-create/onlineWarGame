@@ -106,3 +106,28 @@ docker run --rm -p 8000:8000 \
 - 回合结果发送后，指定格子闪烁 1 秒。
 - 每局结束进入休息界面，双方按空格后进入下一局；最长 60 秒，超时自动继续。
 - 所有局结束后显示游戏结束。
+
+## Boards 条件
+
+匹配界面新增 `boards` 参数，双方只有在 `rows`、`columns`、`games` 和 `boards` 全部一致时才会匹配：
+
+- `boards = 1`：所有格子显示为蓝色。
+- `boards = 2`：所有格子显示为红色。
+- `boards = 3`：左半边蓝色、右半边红色（原默认状态）。
+- `boards = 4`：circle/player 1 看到 `boards = 3`；diamond/player 2 看到 `boards = 2`。
+
+该条件只改变玩家看到的格子颜色，不改变共享的 shapes、numbers 或战斗计算逻辑。
+
+## 回合数据记录
+
+服务端每个回合记录：
+
+- `player1Indices` / `player2Indices`：双方选择格子的 0-based index（6x6 时为 0–35，计算方式 `row * 6 + col`）。
+- `player1Cells` / `player2Cells`：对应的 `[row, col]` 坐标。
+- `numbersBefore`：本回合结算前的完整 numbers 矩阵。
+- `numbersAfter`：本回合结算后的完整 numbers 矩阵。
+- `game` / `turn`：局号与回合号。
+
+记录保存在运行实例的 `data/` 目录。每局全部完成时，两位玩家的结束页面会显示 CSV 和 JSON 下载链接。管理员也可访问 `/data` 查看当前实例中所有记录的下载地址。
+
+注意：Render 免费实例的本地文件系统不是持久化数据库；实例重启或重新部署后记录可能丢失。正式实验若要求长期保存，建议下一步改为外部数据库或对象存储（例如 PostgreSQL/Supabase/S3）。
