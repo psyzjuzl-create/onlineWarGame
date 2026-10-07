@@ -251,6 +251,27 @@ def unfold(indexList, directionList, defendLineBelongList):
     return indexUnfold, directionUnfold, defendLineUnfold
 
 
+
+def checkDirections(j, directions, warField, AorB, mapSize, target):
+    result = [directions[i] for i in range(len(directions))]
+    for direction in result:
+        if direction == RIGHT:
+            if warField[j + 1] == AorB and not j + 1 == target:
+                directions.remove(RIGHT)
+        if direction == LEFT:
+            if warField[j - 1] == AorB and not j - 1 == target:
+                directions.remove(LEFT)
+
+        if direction == UP:
+            if warField[j - mapSize[0]] == AorB and not j - mapSize[0] == target:
+                directions.remove(UP)
+        if direction == DOWN:
+            if warField[j + mapSize[0]] == AorB and not j + mapSize[0] == target:
+                directions.remove(DOWN)
+    return directions
+
+
+
 def generateDirectionA(posList, warField, mapSize):
 
     directionList = []
@@ -265,7 +286,8 @@ def generateDirectionA(posList, warField, mapSize):
         tempList = []
         for j in range(len(warField)):
             if warField[j] == 1:
-                tempList.append(calculateRelativeLocation(j, findTheNearest(j, defendList, mapSize), mapSize))
+                # tempList.append(calculateRelativeLocation(j, findTheNearest(j, defendList, mapSize), mapSize))
+                tempList.append(checkDirections(j, calculateRelativeLocation(j, findTheNearest(j, defendList, mapSize), mapSize), warField, 2, mapSize, findTheNearest(j, defendList, mapSize)))
                 if i == 0:
                     indexList.append(j)
         if i == 0:
@@ -291,7 +313,10 @@ def generateDirectionB(posList, warField, mapSize):
         tempList = []
         for j in range(len(warField)):
             if warField[j] == 2:
-                tempList.append(calculateRelativeLocation(j, findTheNearest(j, defendList, mapSize), mapSize))
+                # tempList.append(calculateRelativeLocation(j, findTheNearest(j, defendList, mapSize), mapSize))
+                tempList.append(
+                    checkDirections(j, calculateRelativeLocation(j, findTheNearest(j, defendList, mapSize), mapSize),
+                                    warField, 1, mapSize, findTheNearest(j, defendList, mapSize)))
                 if i == 0:
                     indexList.append(j)
         if i == 0:
